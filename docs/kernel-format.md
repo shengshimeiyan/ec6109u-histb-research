@@ -80,11 +80,34 @@ stub 的参数区在文件内是 `0xffee` 填充，由 BootROM 运行时填入�
 无法靠静态分析完整重建。因此即使 uImage CRC 正确、payload 换成裸 Image + DTB，
 也无法保证能启动（实测卡在启动阶段）。
 
-## 结论
+## 结论（已根据神雕原帖修正）
 
-要替换内核，正确路径是：
-1. 用与设备**完全一致的 config** 编译内核（不是 defconfig 猜测）
-2. 用厂商工具链/源码中的打包脚本生成海思格式内核（保留 stub、DTB、签名流程）
-3. 或者干脆不替换内核，把驱动做成 built-in 随内核一起用厂商流程打包
+**手工改 uImage payload 不可行** —— 之前的尝试全部失败。
 
-单纯"手工改 uImage payload"不可行。
+根本原因：内核必须用**海思官方 SDK** 编译，SDK 的 `make linux` 会自动
+生成含正确 stub、DTB、签名的海思格式内核。第三方裸内核源码 + defconfig
+猜测的方式行不通。
+
+正确流程（来自神雕 teasiu 原帖 https://www.znds.com/tv-1207323-1-1.html）：
+```bash
+cd HiSTBLinuxV100R005C00SPC060
+source ./env.sh                        # 海思专用编译环境 (gcc 6.5 + glibc 2.22)
+cp configs/hi3798mv200/xxx_cfg.mak ./cfg.mak   # 厂商完整配置
+make menuconfig
+make hiboot                            # U-Boot
+make prebuilts                         # 生成 bootargs.bin
+cd source/kernel/linux-4.4.y/
+make ARCH=arm64 hi3798mv200_defconfig
+make ARCH=arm64 menuconfig             # 在这里勾选 mt7601u / rtl8188 / btusb 驱动
+make clean
+cd HiSTBLinuxV100R005C00SPC060
+make linux                             # 自动产出正确的海思格式 hi_kernel.bin
+```
+
+关键点：
+- 必须用 `source ./env.sh` 加载 SDK 的交叉编译环境
+- 驱动在 `make menuconfig` 里勾选（built-in），随内核一起编译
+- `make linux` 由 SDK 负责打包（stub/DTB/签名全部自动处理），无需手工封装 uImage
+- 4G 与 8G 机型 fastboot.bin 不同，必须匹配（EC6109-U/M 用 mv2dma / 1+4G）
+
+SDK 下载：https://www.histb.com/ ，编译示例见官方 HiSTBLinuxV100R005C00SPC060。
