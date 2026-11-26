@@ -49,3 +49,68 @@ https://github.com/histb-mainline — 海思 Hi3716/Hi3796/Hi3798 系列的主�
 - 主线内核在真实 EC6109-U/M 硬件上未经验证（项目只验证了 HC2910/MV200H）
 - 分区/引导格式、PHY 参数、DDR 地址可能需要按实际硬件调整
 - 保留 v8 稳定包作为随时可恢复的退路
+
+---
+
+# 主线移植复盘：为什么还不能启动（2026-11-26）
+
+## 已完成的构建（全部就绪）
+
+```
+kernel-tree/arch/arm64/boot/Image                                57 MB
+kernel-tree/arch/arm64/boot/dts/hisilicon/hi3798mv200-ec6109u.dtb 16 KB
+hi_kernel_mainline_gz.bin   21 MB（gzip 后，可放进 40MB kernel 分区）
+```
+
+- 130 个 histb-mainline 补丁全部应用（0 失败）
+- Linux 7.4-rc4 编译通过，驱动齐全（mt7601u / rtl8xxxu / btusb / hisi_femac）
+- 板级 DTS 基于 HC2910 改编，1 GiB 内存，DTS 编译通过
+
+## 排除的错误假设
+
+| 假设 | 结论 |
+|---|---|
+| 主线不支持 `blkdevparts=` | ❌ 错。主线有 `block/partitions/cmdline.c`，`CONFIG_CMDLINE_PARTITION=y` 已启用 |
+| 内核太大放不进 40MB 分区 | ✅ 对，已用 gzip 解决（21MB） |
+| 恢复阶段用新内核启动 p7 | ✅ 对，这是"卡在正在刷入"的直接原因 |
+
+## 真正的技术障碍：引导协议
+
+海思 `hi_kernel.bin` 的结构（实测）：
+
+```
+0x0     - 0x70a8   海思头 + **可执行 AArch64 stub**（0x80 处即 mov x0,#0 / mov x1,#8 等指令）
+0x70a8  - 0x70e8   uImage header (load=ep=0x2000000, comp=0)
+0x70e8  - ...      uImage payload
+        └─ 原厂内核: [内层 stub 4.4KB][压缩内核+DTB] —— 内层 stub 负责
+                      重定位、解压、**把 DTB 地址放进 x0**
+```
+
+**关键**：arm64 主线内核**必须**从 `x0` 取得 DTB 指针（arm64 不支持 appended DTB，
+那是 arm32 的特性）。而海思这个 loader 不会传 x0。
+
+原厂内核能启动，是因为它的 **uImage payload 自带一个内层 stub** 来做这件事。
+我们直接用「gzImage + DTB」作 payload，缺了这个 stub → 内核拿不到设备树 → 挂死。
+
+## 要走到下一步，必须
+
+1. 反汇编海思 loader 的调用约定（入口地址、寄存器状态、payload 放置位置），
+   然后自己写一个 ~100 行的 AArch64 stub（设 x0=DTB、跳到内核），
+2. **或者** 走 histb-mainline 官方路线：`histb-stage1` → TF-A BL31 → 主线 U-Boot → 主线内核
+   （项目已在 Hi3798MV200H 创维盒子硬件验证）
+
+两条路都需要**观察启动早期行为**——而本机顶盒无 TTL 串口、HDMI 不显示内核日志。
+
+## 为什么 kexec 也不行
+
+本内核未编译 `CONFIG_KEXEC`（`/proc/kallsyms` 无 `kexec_load` / `machine_kexec`），
+无法从运行中的 4.4 内核安全跳转到主线内核。所以没有"零风险试启动"的办法。
+
+## 结论
+
+主线移植的**软件工作已全部完成**（补丁、内核、DTS、驱动、打包格式）。
+剩下的是引导链适配，这一步**必须有 USB-TTL 串口**才能进行：
+- 观察 loader 的入口寄存器/内存布局
+- 或用 hiloot（本项目提供的开源 HiTool 替代品，走 USB 串口）刷 stage1 + TF-A
+
+一根 CH340（3.3V，约 8 元）即可解锁这条路，同时也能用来诊断 WiFi 驱动的硬件问题。
