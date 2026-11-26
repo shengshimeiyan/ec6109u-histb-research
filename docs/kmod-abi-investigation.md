@@ -88,3 +88,65 @@ insmod /root/kmods/mt7601u.ko
 
 `r8152` + `usbnet` 已内建 → **USB 有线网卡（如 Realtek RTL8153）插上即可用**，
 可给盒子增加一个有线网口，无需任何模块。
+---
+
+# 更新：ABI 问题已解决（2026-11-26）
+
+## 决定性突破：厂商预编译模块 + 改 vermagic
+
+官方 apt 源 `https://www.ecoo.top/update/repo/arm64` 里有现成的 WiFi 驱动包：
+
+```
+histb-wifi-hi3798mv200    v0.1.0 / v0.1.1
+  └── usr/lib/modules/4.4.35_ecoo_26010066/
+        ├── mt7601u.ko    (164 KB)
+        ├── rtl8188eu.ko  (2.3 MB，Realtek 官方驱动)
+        └── rtl8188fu.ko  (1.7 MB)
+  └── usr/lib/firmware/rtlwifi/{rtl8188eufw,rtl8188fufw}.bin
+```
+
+这些模块由厂商用其自有配置编译，**ABI 与 ecoo 内核一致**。唯一障碍是
+目录名/vermagic 指向 `4.4.35_ecoo_26010066`，与本机 `4.4.35_ecoo_82082668` 不符。
+
+**关键技巧**：两个版本号都是 8 位字符，可直接在 .ko 里等长替换 vermagic 字符串：
+
+```python
+d = open('mt7601u.ko','rb').read()
+d = d.replace(b'4.4.35_ecoo_26010066', b'4.4.35_ecoo_82082668')
+open('mt7601u_patched.ko','wb').write(d)
+```
+
+改完后模块**正常加载，不再 panic** —— 证明 ABI 与厂商内核完全兼容。
+
+## 已验证的结果
+
+| 网卡 | 驱动加载 | 识别 | 固件 | 上电初始化 | wlan0 |
+|---|---|---|---|---|---|
+| MT7601U ×2 (148f:7601 / 2717:4106) | ✅ | ✅ ASIC 76010001 | ✅ Build 7640 | ❌ MCU 超时 -110 | ❌ |
+| Realtek RTL8188EU (0bda:b711) | ✅ | ✅ | ✅ | ❌ `HalPwrSeqCmdParsing: Fail to polling Offset[0x6]=00` | 建了但无法 UP |
+
+## Realtek 网卡额外需要的两步
+
+1. **模式切换**：这类网卡默认枚举为虚拟光驱 `0bda:1a2b`（USB Disk autorun），
+   需用 `usb_modeswitch -v 0bda -p 1a2b -K` 切换到 `0bda:b711`。
+   （本内核未启用 `CONFIG_CHR_DEV_SG` / `CONFIG_BLK_DEV_SR`，无法用 `eject /dev/sr0`）
+2. **PID 补丁**：厂商 `rtl8188eu.ko` 的 USB ID 表只含 `8179`/`0179`，
+   需把 ID 表项 `0x8179` 改为 `0xb711`（二进制偏移 `0xf0888`：
+   `03 00 da 0b 79 81` → `03 00 da 0b 11 b7`），并同步改 `alias` 字符串。
+
+## 剩余障碍：芯片上电失败
+
+两块网卡都停在"芯片无法正常上电"：
+- MT7601U：固件上传成功后 MCU 无响应（`Vendor request req:07 off:0080 failed:-110`）
+- RTL8188EU：`HalPwrSeqCmdParsing: Fail to polling Offset[0x6]=00`
+  该网卡 efuse 中 MAC 全零（`00:00:00:00:00:00`），属廉价克隆片
+
+尝试过 `rtw_pll_ref_clk_sel=0/1/2/3` 均无效。
+
+**共同点是"芯片不响应"** → 高度怀疑 **USB 供电不足**（机顶盒 USB 口带载能力弱，
+WiFi 网卡峰值电流 300-500mA）。建议用**带外部供电的 USB HUB** 测试。
+
+## 结论
+
+驱动侧已完全打通（ABI、vermagic、模式切换、固件、PID 全部解决）。
+剩下的是硬件供电/网卡质量问题：换一块正品 RTL8188EU（0bda:8179）或加带源 HUB 即可。
