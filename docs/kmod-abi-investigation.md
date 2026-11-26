@@ -150,3 +150,58 @@ WiFi 网卡峰值电流 300-500mA）。建议用**带外部供电的 USB HUB** �
 
 驱动侧已完全打通（ABI、vermagic、模式切换、固件、PID 全部解决）。
 剩下的是硬件供电/网卡质量问题：换一块正品 RTL8188EU（0bda:8179）或加带源 HUB 即可。
+
+---
+
+# 最终状态：软件打通，硬件受限
+
+## 已固化到系统的成果（v8 系统上已验证）
+
+```
+/lib/modules/4.4.35_ecoo_82082668/extra/
+├── rtl8188eu.ko   2.3M  (厂商原版 + PID 补丁 b711)
+├── rtl8188fu.ko   1.7M  (厂商原版 + PID 补丁 b711)
+└── mt7601u.ko     161K  (厂商原版)
+
+/lib/firmware/
+├── mt7601u.bin           (45K)
+├── rtl8188eufw.bin       (14K)
+└── rtl8188fufw.bin       (21K)
+
+/etc/udev/rules.d/99-rtl8188-mode-switch.rules   # 自动模式切换
+/usr/local/bin/rtl-modeswitch.sh
+```
+
+三个模块均可 `modprobe` 成功，`lsmod` 可见，系统稳定无崩溃。
+
+## 决定性证据：问题在硬件
+
+| 证据 | 说明 |
+|---|---|
+| 两个不同驱动 (8188EU v4.3.24 / 8188FU v4.3.23) | 在**完全相同位置**失败：`HalPwrSeqCmdParsing: Fail to polling Offset[0x6]=00` |
+| efuse MAC = `00:00:00:00:00:00` | 正品芯片必有 MAC，此为克隆片特征 |
+| MT7601U ×2 | 固件上传后 MCU 无响应 `req:07 off:0080 failed:-110` |
+| 换 USB 口（EHCI/xHCI 都试） | 结果相同 |
+| 关闭 USB autosuspend、调 PLL 时钟参数 | 无效 |
+| dmesg 无过流告警 | 但廉价 STB 的 USB 供电可能不足以驱动 RF 芯片 |
+
+三块网卡、两个芯片家族，全部停在"芯片无法上电" → 硬件问题（克隆片缺陷 或
+机顶盒 USB 供电不足）。
+
+## 建议的下一步
+
+1. **把网卡插到电脑上验证**——若电脑上正常，则是盒子供电问题，需**带外部供电的 USB HUB**
+2. **更换正品 RTL8188EU（PID 必须是 0bda:8179）**——厂商模块原生支持，
+   插上后 udev 规则 + modprobe 即可工作，无需任何额外操作
+3. 继续使用有线（v8 系统本身是稳定可用的 NAS）
+
+## 附：Realtek 克隆网卡模式切换说明
+
+这类网卡上电默认枚举为虚拟光驱 `0bda:1a2b`，必须切换到 WiFi 模式 `0bda:b711`：
+
+```bash
+usb_modeswitch -v 0bda -p 1a2b -K -W
+```
+
+本内核未启用 `CONFIG_CHR_DEV_SG` / `CONFIG_BLK_DEV_SR`，因此无法用
+`eject /dev/sr0` 的方式触发，必须用 usb-modeswitch（走 libusb）。
